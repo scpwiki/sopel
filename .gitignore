@@ -15,6 +15,9 @@ sopel.egg-info/*
 .*.sw*
 .pid-*
 
+# Exclusions
+!*requirements.txt
+
 # IntelliJ idea
 .idea
 *.iml
