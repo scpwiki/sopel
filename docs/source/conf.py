@@ -66,7 +66,7 @@ master_doc = 'index'
 
 # General information about the project.
 project = u'Sopel'
-copyright = u'2012-2019, Sopel contributors'
+copyright = u'2012-2020, Sopel contributors'
 
 # The version info for the project you're documenting, acts as replacement for
 # |version| and |release|, also used in various other places throughout the
@@ -116,21 +116,27 @@ pygments_style = 'sphinx'
 
 # The theme to use for HTML and HTML Help pages.  See the documentation for
 # a list of builtin themes.
-html_theme = 'alabaster'
+html_theme = 'furo'
 
 # Theme options are theme-specific and customize the look and feel of a theme
 # further.  For a list of options available for each theme, see the
 # documentation.
 html_theme_options = {
-    'logo': 'sopel.png',
-    'logo_name': True,
-    'logo_text_align': 'center',
-    'description': 'A Python IRC bot framework.',
-    'donate_url': 'https://opencollective.com/sopel',
-    'extra_nav_links': {
-        'Back to main site': 'https://sopel.chat/',
+    'navigation_with_keys': True,
+    'light_logo': 'sopel-black.png',
+    'dark_logo': 'sopel-white.png',
+    'light_css_variables': {
+        'sidebar-tree-space-above': '1em',
     }
 }
+
+# Extra CSS files to include, relative to html_static_path.
+html_css_files = [
+    'custom.css',
+]
+
+# Extra JavaScript files to include, relative to html_static_path.
+#html_js_files = []
 
 # Add any paths that contain custom themes here, relative to this directory.
 #html_theme_path = []
