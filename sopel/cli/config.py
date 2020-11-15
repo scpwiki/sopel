@@ -27,6 +27,9 @@ def build_parser():
     list_parser = subparsers.add_parser(
         'list',
         help="List available configurations from Sopel's config directory",
+        # TODO: if https://github.com/sphinx-contrib/autoprogram/pull/21 is
+        # accepted, we'll need to require a version of autoprogram including
+        # the fix. (If not... we need an alternative solution locally.)
         description="""
             List available configurations from Sopel's config directory
             with the extension "{ext}". Use option ``--config-dir`` to use a
