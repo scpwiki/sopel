@@ -144,9 +144,14 @@ def say_post_info(bot, trigger, id_, show_link=True, show_comments_link=False):
     try:
         s = bot.memory['reddit_praw'].submission(id=id_)
 
-        message = ('{title} {link}{nsfw} | {points} {points_text} '
+        message = ('{title}{flair} {link}{nsfw} | {points} {points_text} '
                    '({percent}) | {comments} comments | Posted by {author} | '
                    'Created at {created}{comments_link}')
+
+        if s.link_flair_text:
+            flair = " ('{}' flair)".format(s.link_flair_text)
+        else:
+            flair = ''
 
         subreddit = s.subreddit.display_name
         if not show_link:
@@ -204,9 +209,9 @@ def say_post_info(bot, trigger, id_, show_link=True, show_comments_link=False):
 
         title = unescape(s.title)
         message = message.format(
-            title=title, link=link, nsfw=nsfw, points=s.score, points_text=points_text,
-            percent=percent, comments=s.num_comments, author=author, created=created,
-            comments_link=comments_link)
+            title=title, flair=flair, link=link, nsfw=nsfw, points=s.score,
+            points_text=points_text, percent=percent, comments=s.num_comments,
+            author=author, created=created, comments_link=comments_link)
 
         bot.say(message)
     except prawcore.exceptions.NotFound:
