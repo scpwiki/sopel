@@ -284,7 +284,7 @@ def check_email(bot, email, nick):
 def toggle_safe(bot, trigger):
     global safe_mode
     safe_mode = not safe_mode
-    return bot.reply(f"Email check module safe mode now {'on' if safe_mode else 'off'}")
+    return bot.reply(f"Email check module safe mode now {'ON' if safe_mode else 'OFF'}")
 
 # <NickServ> ExampleAccount REGISTER: ExampleNick to foo@example.com
 # (note the 0x02 bold chars)
@@ -311,4 +311,3 @@ def handle_ns_register(bot, trigger):
                 return LOGGER.debug(f'Registration of {nick} to {email} OK.')
     except:
         alert(f"Lookup for f{nick} with email @f{domain} failed! Keep an eye on them.")
-
