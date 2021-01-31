@@ -19,13 +19,20 @@ from sopel.config.types import FilenameAttribute, StaticSection, ValidatedAttrib
 from sopel.tools import events, target, Identifier
 
 from sqlalchemy import Column, String, Float, Boolean, TIMESTAMP
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.declarative import declarative_base
 
 try:
     from ip import get_exemption
+    from ip import ipqs_lock
 except:
+    import threading
+
     def get_exemption(ip):
         return "Can't access exemptions; failing safe"
+
+    ipqs_lock = threading.Lock()
+
 
 EMAIL_REGEX = re.compile(r"([a-zA-Z0-9_.+-]+)@([a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+)")
 IRCCLOUD_USER_REGEX = re.compile(r"[us]id[0-9]{4,}")
@@ -44,6 +51,9 @@ LOGGER = logging.getLogger(__name__)
 
 BASE = declarative_base()
 
+safe_mode = True
+db_populated = False
+
 #SQLAlchemy container class
 class KnownEmails(BASE):
     __tablename__ = 'known_emails'
@@ -56,10 +66,9 @@ class KnownEmails(BASE):
 
 class EmailCheckSection(StaticSection):
     IPQS_key = ValidatedAttribute('IPQS_key')
-    disallow_threshold = ValidatedAttribute("disallow_threshold", parse=float)
-    malicious_threshold = ValidatedAttribute("malicious_threshold", parse=float)
-    gline_time = ValidatedAttribute('gline_time')
-    #TODO; just hard-coded ones for now
+    disallow_threshold = ValidatedAttribute("disallow_threshold", parse=float, default=50.0)
+    malicious_threshold = ValidatedAttribute("malicious_threshold", parse=float, default=75.0)
+    gline_time = ValidatedAttribute('gline_time', default="24h")
     exempt_suffixes = ListAttribute("exempt_suffixes")
     warn_chans = ListAttribute("warn_chans")
     protect_chans = ListAttribute("protect_chans")
@@ -69,15 +78,12 @@ def configure(config):
     config.emailcheck.configure_setting('IPQS_key',
                                         'Access key for IPQS service')
     config.emailcheck.configure_setting('disallow_threshold',
-                                        'Addresses with scores >= this will be disallowed; no punishment',
-                                        default=50.0)
+                                        'Addresses with scores >= this will be disallowed; no punishment')
     config.emailcheck.configure_setting('malicious_threshold',
-                                        'Addresses with scores >= this will be interpreted as attacks',
-                                        default=75.0)
+                                        'Addresses with scores >= this will be interpreted as attacks')
     config.emailcheck.configure_setting('gline_time',
                                         'Users attempting to register with malicious addresses will be '
-                                        'glined for this priod of time.',
-                                        default="24h")
+                                        'glined for this priod of time.')
     config.emailcheck.configure_setting('exempt_suffixes',
                                         'Suffixes (TLD, whole domain, etc.) to exempt from checking')
     config.emailcheck.configure_setting('warn_chans',
@@ -108,26 +114,38 @@ class DomainInfo:
     flag_recent_abuse: bool
 
 def alert(bot, alert_msg: str, log_err: bool = False):
-    for channel in config.emailcheck.warn_chans:
+    for channel in bot.config.emailcheck.warn_chans:
         bot.say(alert_msg, channel)
     if log_err:
         LOGGER.error(alert_msg)
 
 def add_badmail(bot, email):
     #Right now we're BADMAILing whole domains. This might change.
-    bot.write("NICKSERV", "badmail", "add", f'*@{email.domain}')
+    if safe_mode:
+        LOGGER.info(f"SAFE MODE: Would badmail {email}")
+    else:
+        bot.write("NICKSERV", "badmail", "add", f'*@{email.domain}')
 
 def fdrop(bot, nick: str):
-    bot.write("NICKSERV", "fdrop", nick.lower())
+    if safe_mode:
+        LOGGER.info(f"SAFE MODE: Would fdrop {nick}")
+    else:
+        bot.write("NICKSERV", "fdrop", nick.lower())
 
 def gline_ip(bot, ip: str, duration: str):
-    bot.write("GLINE", f'*@{ip}', duration, KILL_STR)
+    if safe_mode:
+        LOGGER.info(f"SAFE MODE: Would gline {ip} for {duration}")
+    else:
+        bot.write("GLINE", f'*@{ip}', duration, KILL_STR)
 
 def gline_username(bot, nick: str, duration: str):
     if known_user := bot.users.get(Identifier(nick)):
         username = known_user.user.lower() # Should already be lowercase
         if IRCCLOUD_USER_REGEX.match(username):
-            bot.write("GLINE", f'{username}@*', duration, KILL_STR)
+            if safe_mode:
+                LOGGER.info(f"SAFE MODE: Would gline {username} for {duration}")
+            else:
+                bot.write("GLINE", f'{username}@*', duration, KILL_STR)
             return
         else:
             alert(bot, f"User {nick} had unexpected non-IRCCloud username {username}", true)
@@ -136,7 +154,10 @@ def gline_username(bot, nick: str, duration: str):
     kill_nick(bot, nick) # Something went wrong with G-line, so fall back to /kill
 
 def kill_nick(bot, nick: str):
-    bot.write("KILL", nick.lower(), KILL_STR)
+    if safe_mode:
+        LOGGER.info(f"SAFE MODE: Would kill {nick}")
+    else:
+        bot.write("KILL", nick.lower(), KILL_STR)
 
 def gline_strategy(bot, nick):
     if (known_user := bot.users.get(Identifier(nick))):
@@ -167,7 +188,10 @@ def gline_or_kill(bot, nick: str, duration: str):
         kill_nick(bot, nick) # duration ignored
 
 def protect_chans(bot):
-    for chan in config.emailcheck.protect_chans:
+    if safe_mode:
+        LOGGER.info(f"SAFE MODE: Would protect chans")
+        return
+    for chan in bot.config.emailcheck.protect_chans:
         bot.write("MODE", chan, "+R")
 
 def malicious_response(bot, nick: str, email):
@@ -177,7 +201,7 @@ def malicious_response(bot, nick: str, email):
              "has a history of spam or abuse, and/or is a disposable email domain. "
              "If this is a legitimate domain, contact staff for assistance.",
              nick.lower())
-    gline_or_kill(bot, nick, config.emailcheck.gline_time)
+    gline_or_kill(bot, nick, bot.config.emailcheck.gline_time)
     protect_chans(bot)
     alert(bot, f"ALERT: User {nick} attempted to register a nick with disposable/spam domain {email.domain}!")
 
@@ -228,12 +252,16 @@ def store_email_score_in_db(session, email, nick, IPQSresult):
     session.commit()
 
 def retrieve_score(bot, email, nick):
-    session = bot.db.ssession()
+    session = bot.db.session()
     try:
+        global db_populated
+        if not db_populated:
+            BASE.metadata.create_all(bot.db.engine)
+            db_populated = True
         if retval := get_email_score_from_db(session, email):
             return retval
         else:
-            if IPQSresult := fetch_IPQS_email_score(email, config.emailcheck.IPQS_key):
+            if IPQSresult := fetch_IPQS_email_score(email, bot.config.emailcheck.IPQS_key):
                 store_email_score_in_db(session, email, nick, IPQSresult)
                 return IPQSresult
             else: #Shouldn't be possible
@@ -241,8 +269,6 @@ def retrieve_score(bot, email, nick):
     except SQLAlchemyError:
         session.rollback()
         raise
-    finally:
-        session.remove()
 
 def check_email(bot, email, nick):
     if any(map(email.endswith, DEFAULT_EXEMPT_SUFFIXES)):
@@ -253,14 +279,21 @@ def check_email(bot, email, nick):
     else:
         return retrieve_score(bot, email, nick)
 
+@module.require_owner
+@module.commands('toggle_safe_email')
+def toggle_safe(bot, trigger):
+    global safe_mode
+    safe_mode = not safe_mode
+    return bot.reply(f"Email check module safe mode now {'on' if safe_mode else 'off'}")
+
 # <NickServ> ExampleAccount REGISTER: ExampleNick to foo@example.com
 # (note the 0x02 bold chars)
 @module.rule(r'(\S*)\s*REGISTER: \u0002?([\S]+?)\u0002? to \u0002?(\S+)@(\S+?)\u0002?$')
 @module.event("PRIVMSG")
 @module.priority("high")
 def handle_ns_register(bot, trigger):
-    if "nickserv" != trigger.sender.lower():
-        LOGGER.warning(f"Fake registration notice from {trigger.sender.lower()}!")
+    if "nickserv" != trigger.nick.lower():
+        LOGGER.warning(f"Fake registration notice from {trigger.nick.lower()}!")
         return
     #It's really from nickserv.
     _, nick, email_user, email_domain = trigger.groups()
@@ -268,10 +301,10 @@ def handle_ns_register(bot, trigger):
     try:
         if res := check_email(bot, email_user, email_domain, nick): #may be None, in which case we're done
             if res.flag_disposable or (
-                res.score >= config.emailcheck.malicious_threshold):
+                res.score >= bot.config.emailcheck.malicious_threshold):
                 malicious_response(bot, nick, email)
             elif res.flag_recent_abuse or (
-                res.score >= config.emailcheck.disallow_threshold):
+                res.score >= bot.config.emailcheck.disallow_threshold):
                 disallow_response(bot, nick, email)
             else:
                 #already logged server response
