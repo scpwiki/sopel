@@ -173,9 +173,9 @@ def fetch_IPQS_score(
     ) -> tuple[float, bool, bool]: #score, is proxy, has recent abuse flag set
     '''Perform lookup on a specific IP adress using ipqualityscore.com'''
     params = urllib.parse.urlencode({
-        # Case to lower + handle None and other garbage
         'allow_public_access_points': "true" if allow_public_access_points else "false",
         'strictness': int(strictness),
+        # lowercase + handle None and other non-bool garbage
         'fast': "true" if fast else "false",
         'mobile': "true" if mobile else "false",
         })
