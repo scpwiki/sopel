@@ -28,7 +28,7 @@ except:
         return "Can't access exemptions; failing safe"
 
 EMAIL_REGEX = re.compile(r"([a-zA-Z0-9_.+-]+)@([a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+)")
-IRCCLOUD_USER_REGEX = re.compile(r"[us]id[\d]{4,}")
+IRCCLOUD_USER_REGEX = re.compile(r"[us]id[0-9]{4,}")
 DOMAIN_LEN = 50
 
 DEFAULT_EXEMPT_SUFFIXES = {
@@ -237,7 +237,7 @@ def retrieve_score(bot, email, nick):
                 store_email_score_in_db(session, email, nick, IPQSresult)
                 return IPQSresult
             else: #Shouldn't be possible
-                raise RuntimeError("Couldn't retrieve IPQS!")
+                raise RuntimeError(f"Couldn't retrieve IPQS for {email}!")
     except SQLAlchemyError:
         session.rollback()
         raise
@@ -278,5 +278,4 @@ def handle_ns_register(bot, trigger):
                 return LOGGER.debug(f'Registration of {nick} to {email} OK.')
     except:
         alert(f"Lookup for f{nick} with email @f{domain} failed! Keep an eye on them.")
-
 
