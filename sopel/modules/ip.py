@@ -389,15 +389,16 @@ def handle_snotice_ren(bot, trigger):
 
 @module.require_privilege(module.OP)
 @module.commands('ip_exempt')
-@module.example('.ip_exempt 8.8.8.8')
+@module.example('.ip_exempt 8.8.8.8 Known user example123\'s bouncer')
 def ip_exempt(bot, trigger):
-    if not trigger.group(3):
+    if not ipstr := trigger.group(3): # arg 1
         return bot.reply("You must specify an IP or range in CIDR format to exempt.")
-    elif not trigger.group(4):
+    elif not trigger.group(4): # arg 2 must exist; need at least one word of desc
         return bot.reply("You must specify a reason for the exemption.")
-    ipstr = trigger.group(3)
     if '*' in ipstr:
         return bot.reply("Use CIDR format (1.2.3.0/24) rather than wildcard format (1.2.3.*)")
+    # Desc may be multiple words. Group 2 is all arguments. Strip off the first one and
+    # keep the rest. Based on code from the tell.py module.
     reason = trigger.group(2).lstrip(ipstr).lstrip()
     try:
         _add_exemption(ipstr, reason)

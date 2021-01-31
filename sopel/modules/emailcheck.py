@@ -173,10 +173,10 @@ def protect_chans(bot):
 def malicious_response(bot, nick: str, email):
     fdrop(bot, nick)
     add_badmail(bot, email)
-    say(f"You have been temporarily banned from this network because {email.domain} "
-        "has a history of spam or abuse, and/or is a disposable email domain. "
-        "If this is a legitimate domain, contact staff for assistance.",
-        nick.lower())
+    bot.say(f"You have been temporarily banned from this network because {email.domain} "
+             "has a history of spam or abuse, and/or is a disposable email domain. "
+             "If this is a legitimate domain, contact staff for assistance.",
+             nick.lower())
     gline_or_kill(bot, nick, config.emailcheck.gline_time)
     protect_chans(bot)
     alert(bot, f"ALERT: User {nick} attempted to register a nick with disposable/spam domain {email.domain}!")
@@ -184,9 +184,9 @@ def malicious_response(bot, nick: str, email):
 def disallow_response(bot, nick: str, email):
     fdrop(bot, nick)
     add_badmail(bot, email)
-    say(f"Your registration has been disallowed because {email.domain} appears to be suspicious. "
-        "If this is a legitimate domain, contact staff for assistance.",
-        nick.lower())
+    bot.say(f"Your registration has been disallowed because {email.domain} appears to be suspicious. "
+             "If this is a legitimate domain, contact staff for assistance.",
+             nick.lower())
     alert(bot, f"WARNING: User {nick} attempted to register a nick with suspicious domain {email.domain}.")
 
 def fetch_IPQS_email_score(
@@ -255,7 +255,7 @@ def check_email(bot, email, nick):
 
 # <NickServ> ExampleAccount REGISTER: ExampleNick to foo@example.com
 # (note the 0x02 bold chars)
-@module.rule(r'(\S*)\s*REGISTER: ?([\S]+?)? to ?(\S+)@(\S+?)?$')
+@module.rule(r'(\S*)\s*REGISTER: \u0002?([\S]+?)\u0002? to \u0002?(\S+)@(\S+?)\u0002?$')
 @module.event("PRIVMSG")
 @module.priority("high")
 def handle_ns_register(bot, trigger):
