@@ -90,8 +90,8 @@ class Email:
 
 @dataclass
 class DomainInfo:
-    flag_disposable: bool
     flag_valid: bool
+    flag_disposable: bool
 
 def alert(bot, alert_msg: str, log_err: bool = False):
     for channel in bot.config.emailcheck.warn_chans:
@@ -218,7 +218,7 @@ def fetch_validator_pizza_email_info(email_addr: str ) \
         return ValidatorPizzaResponse(data['mx'], data["disposable"])
     elif data['status'] == HTTPStatus.BAD_REQUEST:
         # Address is invalid, assume typo
-        return (False, None)
+        return ValidatorPizzaResponse(False, None)
     elif data['status'] == HTTPStatus.TOO_MANY_REQUESTS:
         # This is unlikely enough that I'm going to postpone dealing with it
         raise RuntimeError("Hit request limit!")
