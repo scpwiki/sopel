@@ -6,13 +6,18 @@ Based on existing sopel code.
 Licensed under the Eiffel Forum License 2.
 """
 
+import json
 import logging
 import re
+import threading
 import urllib
 
 import sqlalchemy.sql
 
+from collections import namedtuple
 from dataclasses import dataclass
+from http import HTTPStatus
+from typing import Tuple
 
 from sopel import db, module
 from sopel.config.types import FilenameAttribute, StaticSection, ValidatedAttribute, ListAttribute
@@ -22,28 +27,10 @@ from sqlalchemy import Column, String, Float, Boolean, TIMESTAMP
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.declarative import declarative_base
 
-try:
-    from ip import get_exemption
-    from ip import ipqs_lock
-except:
-    import threading
+from .ip import get_exemption, sopel_session_scope
 
-    def get_exemption(ip):
-        return "Can't access exemptions; failing safe"
-
-    ipqs_lock = threading.Lock()
-
-
-EMAIL_REGEX = re.compile(r"([a-zA-Z0-9_.+-]+)@([a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+)")
 IRCCLOUD_USER_REGEX = re.compile(r"[us]id[0-9]{4,}")
 DOMAIN_LEN = 50
-
-DEFAULT_EXEMPT_SUFFIXES = {
-    "@gmail.com",
-    "@hotmail.com",
-    "@protonmail.com",
-    ".edu"
-}
 
 KILL_STR = ":Use of disposable email service for nick registration"
 
@@ -51,41 +38,34 @@ LOGGER = logging.getLogger(__name__)
 
 BASE = declarative_base()
 
-safe_mode = True
-db_populated = False
+email_safe_mode = True
+
+pizza_lock = threading.Lock()
+
+ValidatorPizzaResponse = namedtuple('ValidatorPizzaResponse',
+    ['flag_valid', 'flag_disposable'])
+
+GLineStrategy = namedtuple('GLineStrategy', ['strategy', 'targer'])
 
 #SQLAlchemy container class
 class KnownEmails(BASE):
     __tablename__ = 'known_emails'
-    domain = Column(String(DOMAIN_LEN), primary_key=True)
+    domain = Column(String(DOMAIN_LEN), primary_key=True, index=True)
     first_nick = Column(String(40))
-    score = Column(Float)
-    flag_disposable = Column(Boolean)
-    flag_recent_abuse = Column(Boolean)
+    flag_valid = Column(Boolean)
+    flag_disposable = Column(Boolean, nullable=False)
     first_seen = Column(TIMESTAMP, server_default=sqlalchemy.sql.func.now())
 
 class EmailCheckSection(StaticSection):
-    IPQS_key = ValidatedAttribute('IPQS_key')
-    disallow_threshold = ValidatedAttribute("disallow_threshold", parse=float, default=50.0)
-    malicious_threshold = ValidatedAttribute("malicious_threshold", parse=float, default=75.0)
-    gline_time = ValidatedAttribute('gline_time', default="24h")
-    exempt_suffixes = ListAttribute("exempt_suffixes")
-    warn_chans = ListAttribute("warn_chans")
-    protect_chans = ListAttribute("protect_chans")
+    gline_time = ValidatedAttribute('gline_time', default='24h')
+    warn_chans = ListAttribute('warn_chans')
+    protect_chans = ListAttribute('protect_chans')
 
 def configure(config):
     config.define_section('emailcheck', EmailCheckSection)
-    config.emailcheck.configure_setting('IPQS_key',
-                                        'Access key for IPQS service')
-    config.emailcheck.configure_setting('disallow_threshold',
-                                        'Addresses with scores >= this will be disallowed; no punishment')
-    config.emailcheck.configure_setting('malicious_threshold',
-                                        'Addresses with scores >= this will be interpreted as attacks')
     config.emailcheck.configure_setting('gline_time',
                                         'Users attempting to register with malicious addresses will be '
                                         'glined for this priod of time.')
-    config.emailcheck.configure_setting('exempt_suffixes',
-                                        'Suffixes (TLD, whole domain, etc.) to exempt from checking')
     config.emailcheck.configure_setting('warn_chans',
                                         'List of channels to warn when a suspicious user is detected. '
                                         'May be empty.')
@@ -95,6 +75,7 @@ def configure(config):
 
 def setup(bot):
     bot.config.define_section('emailcheck', EmailCheckSection)
+    BASE.metadata.create_all(bot.db.engine)
 
 @dataclass
 class Email:
@@ -109,9 +90,8 @@ class Email:
 
 @dataclass
 class DomainInfo:
-    score: float
     flag_disposable: bool
-    flag_recent_abuse: bool
+    flag_valid: bool
 
 def alert(bot, alert_msg: str, log_err: bool = False):
     for channel in bot.config.emailcheck.warn_chans:
@@ -121,28 +101,28 @@ def alert(bot, alert_msg: str, log_err: bool = False):
 
 def add_badmail(bot, email):
     #Right now we're BADMAILing whole domains. This might change.
-    if safe_mode:
+    if email_safe_mode:
         LOGGER.info(f"SAFE MODE: Would badmail {email}")
     else:
         bot.write("NICKSERV", "badmail", "add", f'*@{email.domain}')
 
 def fdrop(bot, nick: str):
-    if safe_mode:
+    if email_safe_mode:
         LOGGER.info(f"SAFE MODE: Would fdrop {nick}")
     else:
         bot.write("NICKSERV", "fdrop", nick.lower())
 
 def gline_ip(bot, ip: str, duration: str):
-    if safe_mode:
+    if email_safe_mode:
         LOGGER.info(f"SAFE MODE: Would gline {ip} for {duration}")
     else:
         bot.write("GLINE", f'*@{ip}', duration, KILL_STR)
 
-def gline_username(bot, nick: str, duration: str):
+def gline_irccloud(bot, nick: str, duration: str):
     if known_user := bot.users.get(Identifier(nick)):
         username = known_user.user.lower() # Should already be lowercase
         if IRCCLOUD_USER_REGEX.match(username):
-            if safe_mode:
+            if email_safe_mode:
                 LOGGER.info(f"SAFE MODE: Would gline {username} for {duration}")
             else:
                 bot.write("GLINE", f'{username}@*', duration, KILL_STR)
@@ -154,7 +134,7 @@ def gline_username(bot, nick: str, duration: str):
     kill_nick(bot, nick) # Something went wrong with G-line, so fall back to /kill
 
 def kill_nick(bot, nick: str):
-    if safe_mode:
+    if email_safe_mode:
         LOGGER.info(f"SAFE MODE: Would kill {nick}")
     else:
         bot.write("KILL", nick.lower(), KILL_STR)
@@ -167,20 +147,20 @@ def gline_strategy(bot, nick):
             if exemption:
                 if "irccloud" in exemption.lower():
                     # IRCCloud special case: ban uid/sid
-                    return ["gline_username", known_user.user]
+                    return GLineStrategy("gline_irccloud", known_user.user)
                 else: # Fully exempt, so no g-line
                     return None
             else: # No exemption
-                return ["gline_ip", ip]
+                return GLineStrategy("gline_ip", ip)
     else: # Fail safely
         return None
 
 def gline_or_kill(bot, nick: str, duration: str):
-    if strategy := gline_strategy(bot, nick):
-        if strategy[0] == "gline_ip":
-            gline_ip(bot, strategy[1], duration)
-        elif strategy[0] == "gline_username":
-            gline_username(bot, strategy[1], duration)
+    if gline_strat := gline_strategy(bot, nick):
+        if gline_strat.strategy == "gline_ip":
+            gline_ip(bot, strategy.target, duration)
+        elif gline_strat.strategy == "gline_irccloud":
+            gline_irccloud(bot, strategy.target, duration)
         else:
             alert(bot, f"Unknown strategy {strategy} for nick {nick}", true)
             kill_nick(bot, nick) # safest option
@@ -188,11 +168,12 @@ def gline_or_kill(bot, nick: str, duration: str):
         kill_nick(bot, nick) # duration ignored
 
 def protect_chans(bot):
-    if safe_mode:
+    if email_safe_mode:
         LOGGER.info(f"SAFE MODE: Would protect chans")
         return
     for chan in bot.config.emailcheck.protect_chans:
         bot.write("MODE", chan, "+R")
+    alert(bot, f"Setting {', '.join(bot.config.emailcheck.protect_chans)} +R")
 
 def malicious_response(bot, nick: str, email):
     fdrop(bot, nick)
@@ -213,71 +194,67 @@ def disallow_response(bot, nick: str, email):
              nick.lower())
     alert(bot, f"WARNING: User {nick} attempted to register a nick with suspicious domain {email.domain}.")
 
-def fetch_IPQS_email_score(
-    email_addr: str,
-    key: str,
-    fast: bool = True
-    ) -> tuple[float, bool, bool]: #score, disposable, has recent abuse flag set
-    '''Perform lookup on a specific email adress using ipqualityscore.com'''
-    email_str = urllib.parse.quote(email_addr)
-    faststr = str(bool(fast)).lower() #lower + handle None and other garbage
-    params = urllib.parse.urlencode({'fast': faststr})
-    with urllib.request.urlopen(
-        f"https://ipqualityscore.com/api/json/email/{key}/{email_str}?{params}") as url:
-            data = json.loads(url.read().decode())
-            LOGGER.debug(data)
-    if not data['success']:
-        errstr = f"{email_addr} lookup failed with {data['message']}"
+def fetch_validator_pizza_email_info(email_addr: str ) \
+-> Tuple[bool, bool]: #valid, disposable
+    '''Perform lookup on a specific email adress using validator.pizza'''
+    email_addr_str = urllib.parse.quote(str(email_addr))
+    # Cloudflare likes headers. Sigh.
+    hdr = {'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.11 (KHTML, like Gecko) Chrome/23.0.1271.64 Safari/537.11',
+       'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+       'Accept-Charset': 'ISO-8859-1,utf-8;q=0.7,*;q=0.3',
+       'Accept-Encoding': 'none',
+       'Accept-Language': 'en-US,en;q=0.8',
+       'Connection': 'keep-alive'}
+    urlstr = f"https://www.validator.pizza/email/{email_addr_str}"
+    req = urllib.request.Request(urlstr, headers=hdr)
+    try:
+        with pizza_lock, urllib.request.urlopen(req) as url:
+                data = json.loads(url.read().decode())
+                LOGGER.debug(f"Received data from validator.pizza: {data}")
+    except urllib.error.HTTPError as err:
+        LOGGER.error(f"Error retrieving {urlstr}: {err.code}, {err.headers}")
+        raise
+    if data['status'] == HTTPStatus.OK:
+        return ValidatorPizzaResponse(data['mx'], data["disposable"])
+    elif data['status'] == HTTPStatus.BAD_REQUEST:
+        # Address is invalid, assume typo
+        return (False, None)
+    elif data['status'] == HTTPStatus.TOO_MANY_REQUESTS:
+        # This is unlikely enough that I'm going to postpone dealing with it
+        raise RuntimeError("Hit request limit!")
+    else: # Anything other than 200/400/429 is out of spec
+        errstr = f"{email_addr} lookup failed with {data}"
         LOGGER.error(errstr)
         raise RuntimeError(errstr)
-    return (data['fraud_score'], data["disposable"], data["recent_abuse"])
 
-def get_email_score_from_db(session, email):
+def get_email_info_from_db(session, email):
     query_result = session.query(KnownEmails)\
         .filter(KnownEmails.domain == email.domain)\
         .one_or_none()
     if query_result:
         #Any known problematic provider should've been BADMAILed by now, but...
-        return DomainInfo(query_result.score,
-                          query_result.flag_disposable,
-                          query_result.flag_recent_abuse)
+        return DomainInfo(query_result.flag_valid,
+                          query_result.flag_disposable)
 
-def store_email_score_in_db(session, email, nick, IPQSresult):
-    new_known_email = KnownEmails(domain= email.doman[:DOMAIN_LEN],
-                                    first_nick= nick,
-                                    score= IPQSresult[0],
-                                    flag_disposable= IPQSresult[1],
-                                    flag_recent_abuse= IPQSresult[2])
+def store_email_info_in_db(session, email, nick, result):
+    new_known_email = KnownEmails(domain= email.domain[:DOMAIN_LEN],
+                                  first_nick= nick,
+                                  flag_valid= result.flag_valid,
+                                  flag_disposable= result.flag_disposable)
     session.add(new_known_email)
-    session.commit()
 
-def retrieve_score(bot, email, nick):
-    session = bot.db.session()
-    try:
-        global db_populated
-        if not db_populated:
-            BASE.metadata.create_all(bot.db.engine)
-            db_populated = True
-        if retval := get_email_score_from_db(session, email):
+def retrieve_info_for_email(bot, email, nick):
+    session = bot.db.ssession()
+    with sopel_session_scope(bot) as session:
+        if retval := get_email_info_from_db(session, email):
             return retval
         else:
-            if IPQSresult := fetch_IPQS_email_score(email, bot.config.emailcheck.IPQS_key):
-                store_email_score_in_db(session, email, nick, IPQSresult)
-                return IPQSresult
-            else: #Shouldn't be possible
-                raise RuntimeError(f"Couldn't retrieve IPQS for {email}!")
-    except SQLAlchemyError:
-        session.rollback()
-        raise
-
-def check_email(bot, email, nick):
-    if any(map(email.endswith, DEFAULT_EXEMPT_SUFFIXES)):
-        #email is exempt
-        LOGGER.info(f'Email {email} used by {nick} is on the exemption list.')
-        return None # No lookup, no result
-    #Check database
-    else:
-        return retrieve_score(bot, email, nick)
+            if result := fetch_validator_pizza_email_info(email):
+                store_email_info_in_db(session, email, nick, result)
+                return result
+            else:
+                #Should either return or throw
+                raise RuntimeError(f"validator.pizza failed for email: {email}")
 
 @module.require_owner
 @module.commands('toggle_safe_email')
@@ -299,15 +276,16 @@ def handle_ns_register(bot, trigger):
     _, nick, email_user, email_domain = trigger.groups()
     email = Email(email_user, email_domain)
     try:
-        if res := check_email(bot, email_user, email_domain, nick): #may be None, in which case we're done
-            if res.flag_disposable or (
-                res.score >= bot.config.emailcheck.malicious_threshold):
+        # check_email() may return None, in which case we're done
+        if res := retrieve_info_for_email(bot, email, nick):
+            if res.flag_disposable:
                 malicious_response(bot, nick, email)
-            elif res.flag_recent_abuse or (
-                res.score >= bot.config.emailcheck.disallow_threshold):
+            elif not res.flag_valid :
                 disallow_response(bot, nick, email)
             else:
                 #already logged server response
                 return LOGGER.debug(f'Registration of {nick} to {email} OK.')
     except:
-        alert(f"Lookup for f{nick} with email @f{domain} failed! Keep an eye on them.")
+        alert(bot, f"Lookup for {nick} with email @{email_domain} failed! "
+                    "Keep an eye on them.")
+        raise
