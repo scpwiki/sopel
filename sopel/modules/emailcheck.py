@@ -88,11 +88,6 @@ class Email:
     def __post_init__(self):
         self.domain = self.domain.lower()
 
-@dataclass
-class DomainInfo:
-    flag_valid: bool
-    flag_disposable: bool
-
 def alert(bot, alert_msg: str, log_err: bool = False):
     for channel in bot.config.emailcheck.warn_chans:
         bot.say(alert_msg, channel)
@@ -235,14 +230,14 @@ def get_email_info_from_db(session, email):
         .one_or_none()
     if query_result:
         #Any known problematic provider should've been BADMAILed by now, but...
-        return DomainInfo(query_result.flag_valid,
-                          query_result.flag_disposable)
+        return ValidatorPizzaResponse(flag_valid=query_result.flag_valid,
+                                      flag_disposable=query_result.flag_disposable)
 
 def store_email_info_in_db(session, email, nick, result):
-    new_known_email = KnownEmails(domain= email.domain[:DOMAIN_LEN],
-                                  first_nick= nick,
-                                  flag_valid= result.flag_valid,
-                                  flag_disposable= result.flag_disposable)
+    new_known_email = KnownEmails(domain=email.domain[:DOMAIN_LEN],
+                                  first_nick=nick,
+                                  flag_valid=result.flag_valid,
+                                  flag_disposable=result.flag_disposable)
     session.add(new_known_email)
 
 def retrieve_info_for_email(bot, email, nick):
