@@ -178,10 +178,11 @@ def protect_chans(bot):
 def malicious_response(bot, nick: str, email):
     fdrop(bot, nick)
     add_badmail(bot, email)
-    bot.say(f"You have been temporarily banned from this network because {email.domain} "
-             "has a history of spam or abuse, and/or is a disposable email domain. "
-             "If this is a legitimate domain, contact staff for assistance.",
-             nick.lower())
+    if not email_safe_mode:
+        bot.say(f"You have been temporarily banned from this network because {email.domain} "
+                "has a history of spam or abuse, and/or is a disposable email domain. "
+                "If this is a legitimate domain, contact staff for assistance.",
+                nick.lower())
     gline_or_kill(bot, nick, bot.config.emailcheck.gline_time)
     protect_chans(bot)
     alert(bot, f"ALERT: User {nick} attempted to register a nick with disposable/spam domain {email.domain}!")
@@ -189,9 +190,10 @@ def malicious_response(bot, nick: str, email):
 def disallow_response(bot, nick: str, email):
     fdrop(bot, nick)
     add_badmail(bot, email)
-    bot.say(f"Your registration has been disallowed because {email.domain} appears to be suspicious. "
-             "If this is a legitimate domain, contact staff for assistance.",
-             nick.lower())
+    if not email_safe_mode:
+        bot.say(f"Your registration has been disallowed because {email.domain} appears to be suspicious. "
+                "If this is a legitimate domain, contact staff for assistance.",
+                nick.lower())
     alert(bot, f"WARNING: User {nick} attempted to register a nick with suspicious domain {email.domain}.")
 
 def fetch_validator_pizza_email_info(email_addr: str ) \
