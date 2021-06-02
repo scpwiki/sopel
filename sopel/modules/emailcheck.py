@@ -32,7 +32,7 @@ from .ip import get_exemption, sopel_session_scope
 IRCCLOUD_USER_REGEX = re.compile(r"[us]id[0-9]{4,}")
 DOMAIN_LEN = 50
 
-KILL_STR = ":Use of disposable email service for nick registration"
+KILL_STR = "Use of disposable email service for nick registration"
 
 LOGGER = logging.getLogger(__name__)
 
@@ -45,7 +45,7 @@ pizza_lock = threading.Lock()
 ValidatorPizzaResponse = namedtuple('ValidatorPizzaResponse',
     ['flag_valid', 'flag_disposable'])
 
-GLineStrategy = namedtuple('GLineStrategy', ['strategy', 'targer'])
+GLineStrategy = namedtuple('GLineStrategy', ['strategy', 'target'])
 
 #SQLAlchemy container class
 class KnownEmails(BASE):
@@ -99,19 +99,19 @@ def add_badmail(bot, email):
     if email_safe_mode:
         LOGGER.info(f"SAFE MODE: Would badmail {email}")
     else:
-        bot.write("NICKSERV", "badmail", "add", f'*@{email.domain}')
+        bot.write(("NICKSERV", "badmail", "add", f'*@{email.domain}'), "Disposable email domain")
 
 def fdrop(bot, nick: str):
     if email_safe_mode:
         LOGGER.info(f"SAFE MODE: Would fdrop {nick}")
     else:
-        bot.write("NICKSERV", "fdrop", nick.lower())
+        bot.write(("NICKSERV", "fdrop", nick.lower()))
 
 def gline_ip(bot, ip: str, duration: str):
     if email_safe_mode:
         LOGGER.info(f"SAFE MODE: Would gline {ip} for {duration}")
     else:
-        bot.write("GLINE", f'*@{ip}', duration, KILL_STR)
+        bot.write(("GLINE", f'*@{ip}', duration), KILL_STR)
 
 def gline_irccloud(bot, nick: str, duration: str):
     if known_user := bot.users.get(Identifier(nick)):
@@ -120,7 +120,7 @@ def gline_irccloud(bot, nick: str, duration: str):
             if email_safe_mode:
                 LOGGER.info(f"SAFE MODE: Would gline {username} for {duration}")
             else:
-                bot.write("GLINE", f'{username}@*', duration, KILL_STR)
+                bot.write(("GLINE", f'{username}@*', duration), KILL_STR)
             return
         else:
             alert(bot, f"User {nick} had unexpected non-IRCCloud username {username}", true)
@@ -132,7 +132,7 @@ def kill_nick(bot, nick: str):
     if email_safe_mode:
         LOGGER.info(f"SAFE MODE: Would kill {nick}")
     else:
-        bot.write("KILL", nick.lower(), KILL_STR)
+        bot.write(("KILL", nick.lower()), KILL_STR)
 
 def gline_strategy(bot, nick):
     if (known_user := bot.users.get(Identifier(nick))):
@@ -153,11 +153,11 @@ def gline_strategy(bot, nick):
 def gline_or_kill(bot, nick: str, duration: str):
     if gline_strat := gline_strategy(bot, nick):
         if gline_strat.strategy == "gline_ip":
-            gline_ip(bot, strategy.target, duration)
+            gline_ip(bot, gline_strat.target, duration)
         elif gline_strat.strategy == "gline_irccloud":
-            gline_irccloud(bot, strategy.target, duration)
+            gline_irccloud(bot, gline_strat.target, duration)
         else:
-            alert(bot, f"Unknown strategy {strategy} for nick {nick}", true)
+            alert(bot, f"Unknown strategy {gline_strat.strategy} for nick {nick}", true)
             kill_nick(bot, nick) # safest option
     else:
         kill_nick(bot, nick) # duration ignored
@@ -167,8 +167,9 @@ def protect_chans(bot):
         LOGGER.info(f"SAFE MODE: Would protect chans")
         return
     for chan in bot.config.emailcheck.protect_chans:
-        bot.write("MODE", chan, "+R")
-    alert(bot, f"Setting {', '.join(bot.config.emailcheck.protect_chans)} +R")
+        bot.write(("MODE", chan, "+R"))
+    if len(bot.config.emailcheck.protect_chans) > 0:
+        alert(bot, f"Setting {', '.join(bot.config.emailcheck.protect_chans)} +R")
 
 def malicious_response(bot, nick: str, email):
     fdrop(bot, nick)
@@ -256,9 +257,9 @@ def retrieve_info_for_email(bot, email, nick):
 @module.require_owner
 @module.commands('toggle_safe_email')
 def toggle_safe(bot, trigger):
-    global safe_mode
-    safe_mode = not safe_mode
-    return bot.reply(f"Email check module safe mode now {'ON' if safe_mode else 'OFF'}")
+    global email_safe_mode
+    email_safe_mode = not email_safe_mode
+    return bot.reply(f"Email check module safe mode now {'ON' if email_safe_mode else 'OFF'}")
 
 # <NickServ> ExampleAccount REGISTER: ExampleNick to foo@example.com
 # (note the 0x02 bold chars)

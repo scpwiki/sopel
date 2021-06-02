@@ -8,8 +8,6 @@ Licensed under the Eiffel Forum License 2.
 https://sopel.chat
 """
 
-from __future__ import unicode_literals, absolute_import, print_function, division
-
 import ipaddress
 import logging
 import os
@@ -80,9 +78,16 @@ EXEMPT_IP = [
     ("2604:a880:2:d0::/64", "noracodes"),
     ("2a01:4f8:202:62c8::/64", "grumble"),
     ("78.46.73.141", "hooloovoo"),
+    ("2a01:4f8:120:4091::/64", "hooloovoo"),
     ("67.205.43.220", "carolynn ivy, dreamhost"),
     ("212.47.230.56", "skee, token.ro"),
     ("2600:3c01::/64", "atomicthumbs"),
+    ("3.13.93.249", "Lounge"),
+    ("44.135.218.31", "Kufat's shell"),
+    ("159.203.5.135", "BytesAndCoffee's ZNC"),
+    ("5.9.158.70", "john@soupwhale.com, usual nick 'john'"),
+    ("24.85.200.227", "Guildlight; seems to be a legit user."),
+    ("120.28.217.130", "GeoRrey; normal user with tech issues, can't afford to replace vulnerable equipment")
     ]
 
 LOGGER = logging.getLogger(__name__)
@@ -104,6 +109,9 @@ client = None
 class KnownIPs(BASE):
     __tablename__ = 'known_ips'
     ip = Column(String(IP_MAX_LEN), primary_key=True, unique=True, index=True)
+    # For IPv4: address as 32-bit int. For IPv6: /64 network right-shifted 64-bits.
+    # 0::/8 is reserved, so no collisions.
+    # ip_int_representation = Column(Integer, index=True, nullable=False)
     score = Column(Float, nullable=False)
     insert_time = Column(TIMESTAMP, server_default=sqlalchemy.sql.func.now())
 
@@ -193,6 +201,7 @@ def get_exemption(host):
         try:
             ip = ipaddress.ip_address(socket.getaddrinfo(host, None)[0][4][0])
         except:
+            LOGGER.error(f"Couldn't get IP for host {host}")
             raise
     if not ip.is_global:
         LOGGER.debug(f"Non-global IP {ip} seen.")
@@ -209,18 +218,18 @@ def fetch_MaxMind_ip_score(
     '''Perform lookup on a specific IP adress using ipqualityscore.com'''
     with MaxMind_lock:
         data = client.score({'device': {'ip_address': ip_addr}})
-        LOGGER.debug(data)
+        LOGGER.debug(f"Result from MaxMind for {ip_addr}: {data}")
         final_score = max(float(data.risk_score), float(data.ip_address.risk))
         return final_score
 
-def get_ip_score_from_db(session, ip):
+def get_ip_score_from_db(session, ip, ipv6_network):
     query_result = session.query(KnownIPs)\
         .filter(KnownIPs.ip == str(ip))\
         .one_or_none()
     if query_result:
         return query_result.score
 
-def store_ip_score_in_db(session, ip, nick, MaxMind_score):
+def store_ip_score_in_db(session, ip, ipv6_network, nick, MaxMind_score):
     new_known_ip = KnownIPs(ip= ip,
                             score= MaxMind_score)
     session.add(new_known_ip)
@@ -228,12 +237,19 @@ def store_ip_score_in_db(session, ip, nick, MaxMind_score):
 
 def retrieve_score(bot, ip, nick, do_fetch = True):
     LOGGER.debug(f"Beginning lookup for {str(ip)}")
+    ipv6_network = None
+    try:
+        ipv6 = ipaddress.IPv6Address(ip)
+        ipv6_network = int(ipv6) >> 64
+    except ipaddress.AddressValueError:
+        pass
     with sopel_session_scope(bot) as session:
-        if retval := get_ip_score_from_db(session, ip):
+        if retval := get_ip_score_from_db(session, ip, ipv6_network):
+            LOGGER.debug(f"{str(ip)} score retrieved from DB: {retval}")
             return retval
         elif do_fetch:
             if MaxMind_score := fetch_MaxMind_ip_score(ip, bot.config.ip.MaxMind_key):
-                store_ip_score_in_db(session, ip, nick, MaxMind_score)
+                store_ip_score_in_db(session, ip, ipv6_network, nick, MaxMind_score)
                 return MaxMind_score
             else: #Shouldn't be possible
                 raise RuntimeError("Couldn't retrieve IPQS!")
@@ -312,15 +328,16 @@ def zline(bot, ip, nick, duration):
     if ip_safe_mode:
         LOGGER.info(f"SAFE MODE: Would zline {ip} for {duration}")
     else:
-        bot.write("ZLINE", ip, duration, f":Auto z-line {nick}.")
+        bot.write(("ZLINE", ip, duration), f":Auto z-line {nick}.")
 
 def protect_chans(bot):
     if ip_safe_mode:
         LOGGER.info(f"SAFE MODE: Would protect chans")
         return
     for chan in bot.config.emailcheck.protect_chans:
-        bot.write("MODE", chan, "+R")
-    alert(bot, f"Setting {', '.join(bot.config.emailcheck.protect_chans)} +R")
+        bot.write(("MODE", chan, "+R"))
+    if len(bot.config.emailcheck.protect_chans) > 0:
+        alert(bot, f"Setting {', '.join(bot.config.emailcheck.protect_chans)} +R")
 
 def examine_user(bot, user, ip, host, nick):
     populate_user(bot, user, ip, host, nick)
@@ -336,8 +353,7 @@ def examine_user(bot, user, ip, host, nick):
             zline(bot, ip, nick, duration)
             protect_chans(bot)
         elif score >= bot.config.ip.warn_threshold:
-            alert(bot, ('Orps' if ip_safe_mode else 'Ops') +
-                       f": Nick {nick} has abuse score {score}; keep an eye on them.")
+            alert(bot, f"Attention: Nick {nick} has abuse score {score}; keep an eye on them.")
     return score
 
 @module.event(events.RPL_WHOSPCRPL)
@@ -385,7 +401,7 @@ def send_who(bot, _):
         bot.write(['WHO * n%nuhti,' + rand])
 
 #:safe.oh.us.irc.scpwiki.com NOTICE Kufat :*** CONNECT: Client connecting on port 6697 (class main): ASNbot!sopel@ool-45734b07.dyn.optonline.net (69.115.75.7) [Sopel: https://sopel.chat/]
-@module.rule(r'.*Client connecting .*: (\S*)!(\S*)@(\S*) \((.*)\)')
+@module.rule(r'.*Client connecting .*: (\S*)!(\S*)@(\S*) \((\S+)\)')
 @module.event("NOTICE")
 @module.priority("high")
 def handle_snotice_conn(bot, trigger):
@@ -393,13 +409,6 @@ def handle_snotice_conn(bot, trigger):
     #Only servers may have '.' in the sender name, so this isn't spoofable
     if bot.config.ip.sno_string in trigger.sender:
         nick, user, host, ip = trigger.groups()
-        # We need to check if the IP is in any exempt CIDR ranges
-        if get_exemption(ip):
-            return
-        #Be **certain** we don't waste our lookups on irccloud
-        if any(host.endswith(s) for s in (".irccloud.com", ".mibbit.com")):
-            LOGGER.error(f"{host} slipped through get_exemption()")
-            return
         score = examine_user(bot, user, ip, host, nick)
         if score:
             # Acted on above; just log here
@@ -419,7 +428,7 @@ def handle_snotice_ren(bot, trigger):
         if olduser := bot.users.get(oldnick):
             populate_user(bot, olduser.user, olduser.ip, olduser.host, newnick)
 
-@module.require_owner
+@module.require_admin
 @module.commands('toggle_safe_ip')
 def toggle_safe(bot, trigger):
     global ip_safe_mode
@@ -427,7 +436,7 @@ def toggle_safe(bot, trigger):
     return bot.reply(f"IP module safe mode now {'on' if ip_safe_mode else 'off'}")
 
 @module.require_privilege(module.OP)
-@module.commands('ip_exempt')
+@module.commands('ip_exempt', 'add_exemption')
 @module.example('.ip_exempt 8.8.8.8 Known user example123\'s bouncer')
 def ip_exempt(bot, trigger):
     ipstr = trigger.group(3) # arg 1
@@ -453,6 +462,7 @@ def ip_exempt(bot, trigger):
          ignore='Downloading GeoIP database, please wait...',
          online=True)
 def ip(bot, trigger):
+    LOGGER.debug(trigger)
     if trigger.is_privmsg and not trigger.admin:
         return bot.reply("You're not my supervisor!")
     full = ( ( trigger.sender.lower() in ("#skipirc-staff", "#kufat") ) or
@@ -532,7 +542,7 @@ def ip(bot, trigger):
         response += " IP belongs to mibbit; no location data available"
         return bot.say(response)
     elif ex:
-        response += f" | IP meets exemption [{ex}] |"
+        response += f" IP meets exemption [{ex}] |"
         # Still look up an IP that's exempt for other reasons
 
     if full:
